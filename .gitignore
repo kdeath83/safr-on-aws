@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+cdk/node_modules/
+cdk/dist/
+
+# CDK
+cdk.out/
+cdk-outputs.json
+cdk.context.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.pem
+*.key
+credentials
+
+# AWS
+.aws-sso/
