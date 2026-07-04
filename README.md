@@ -338,5 +338,3 @@ This is a **working prototype**, not a production system. Known gaps:
 MIT — see [LICENSE](LICENSE)
 
 ---
-
-*Built for the BuildFin.ai community. Contributions welcome.*
