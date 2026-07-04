@@ -98,15 +98,15 @@ This project implements **all five SAFR components** as a single CDK stack with 
 
 ### One-Click Deploy
 
-[![GitHub repo](https://img.shields.io/badge/GitHub-kdeath83%2Fsafr--on--aws-blue?style=flat&logo=github)](https://github.com/kdeath83/safr-on-aws)
-[![CDK](https://img.shields.io/badge/AWS%20CDK-TypeScript-blue?style=flat&logo=amazonwebservices)](https://aws.amazon.com/cdk/)
-[![License](https://img.shields.io/badge/license-MIT-green?style=flat)](LICENSE)
-
 ```bash
 git clone https://github.com/kdeath83/safr-on-aws.git
 cd safr-on-aws
 ./deploy.sh
 ```
+
+That's it. The script handles CDK bootstrap, stack deployment, and seeds controls and agents. Under five minutes end to end.
+
+[![View on GitHub](https://img.shields.io/badge/View%20on%20GitHub-kdeath83%2Fsafr--on--aws-blue?style=for-the-badge&logo=github)](https://github.com/kdeath83/safr-on-aws)
 
 **Prerequisites:** AWS CLI configured, Node.js ≥ 18, `npx` available.
 
