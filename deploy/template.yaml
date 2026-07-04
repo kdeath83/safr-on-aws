@@ -1,0 +1,547 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "SAFR on AWS — Safeguards for Agentic Finance at Runtime. Deploys all 5 SAFR components: Governance Envelope, Agent Identity, Controls Repository, Disposition Engine, Audit Log."
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "API Configuration"
+        Parameters:
+          - StageName
+
+Parameters:
+  StageName:
+    Type: String
+    Default: v1
+    Description: "API Gateway stage name"
+
+Resources:
+  # ============================================================
+  # Lambda Code Bucket (created by stack, populated by custom resource)
+  # ============================================================
+  CodeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # ============================================================
+  # Bootstrap: Download lambda.zip from GitHub into CodeBucket
+  # ============================================================
+  BootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: BootstrapS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${CodeBucket.Arn}/*"
+
+  BootstrapFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.11
+      Architectures: ["arm64"]
+      Handler: index.handler
+      Role: !GetAtt BootstrapRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import boto3, urllib.request, os
+          s3 = boto3.client("s3")
+          def handler(event, context):
+              if event.get("RequestType") == "Delete":
+                  return {"Status": "SUCCESS"}
+              url = "https://raw.githubusercontent.com/kdeath83/safr-on-aws/main/deploy/lambda.zip"
+              bucket = os.environ["CODE_BUCKET"]
+              key = "lambda.zip"
+              print(f"Downloading {url} ...")
+              urllib.request.urlretrieve(url, "/tmp/lambda.zip")
+              print(f"Uploading to s3://{bucket}/{key} ...")
+              s3.upload_file("/tmp/lambda.zip", bucket, key)
+              print("Bootstrap complete")
+              return {"Status": "SUCCESS"}
+      Environment:
+        Variables:
+          CODE_BUCKET: !Ref CodeBucket
+
+  BootstrapCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt BootstrapFunction.Arn
+      Version: v1
+
+  # ============================================================
+  # SAFR Component 3: Controls Repository (DynamoDB)
+  # ============================================================
+  ControlsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: safr-controls
+      AttributeDefinitions:
+        - AttributeName: control_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: control_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # ============================================================
+  # SAFR Component 2: Agent Identity Registry (DynamoDB)
+  # ============================================================
+  AgentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: safr-agents
+      AttributeDefinitions:
+        - AttributeName: agent_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: agent_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # ============================================================
+  # SAFR Component 5: Audit Log (S3 with Object Lock)
+  # ============================================================
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      ObjectLockEnabled: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  AuditBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: "s3:*"
+            Effect: Deny
+            Principal: "*"
+            Resource:
+              - !GetAtt AuditBucket.Arn
+              - !Join ["", [!GetAtt AuditBucket.Arn, "/*"]]
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+  # ============================================================
+  # IAM Role: Disposition Engine Lambda
+  # ============================================================
+  EngineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: EngineAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ControlsTable.Arn
+                  - !GetAtt AgentsTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectRetention
+                  - s3:PutObjectLegalHold
+                Resource: !Sub "${AuditBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
+
+  # ============================================================
+  # Disposition Engine Lambda
+  # ============================================================
+  EngineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/safr-disposition-engine"
+      RetentionInDays: 7
+
+  EngineFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: safr-disposition-engine
+      Runtime: python3.11
+      Architectures: ["arm64"]
+      Handler: disposition_engine.index.lambda_handler
+      Role: !GetAtt EngineRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          CONTROLS_TABLE: !Ref ControlsTable
+          AGENTS_TABLE: !Ref AgentsTable
+          AUDIT_BUCKET: !Ref AuditBucket
+          CORS_ORIGIN: ""
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: lambda.zip
+    DependsOn:
+      - BootstrapCustomResource
+      - EngineLogGroup
+
+  # ============================================================
+  # Seed Lambda
+  # ============================================================
+  SeedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: SeedAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt ControlsTable.Arn
+                  - !GetAtt AgentsTable.Arn
+
+  SeedLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/safr-seed-controls"
+      RetentionInDays: 7
+
+  SeedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: safr-seed-controls
+      Runtime: python3.11
+      Architectures: ["arm64"]
+      Handler: seed_controls.index.lambda_handler
+      Role: !GetAtt SeedRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: lambda.zip
+    DependsOn:
+      - BootstrapCustomResource
+      - SeedLogGroup
+
+  # ============================================================
+  # Custom Resource: Seed controls + agents
+  # ============================================================
+  SeedCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SeedFunction.Arn
+      SeedVersion: v1
+
+  # ============================================================
+  # API Gateway
+  # ============================================================
+  SafrApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: SAFR Governance API
+      Description: "SAFR — Safeguards for Agentic Finance at Runtime"
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  SafrApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: safr-api-key
+      Description: "API key for SAFR Governance API"
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref SafrApi
+          StageName: !Ref StageName
+
+  SafrUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: safr-usage-plan
+      ApiStages:
+        - ApiId: !Ref SafrApi
+          Stage: !Ref StageName
+      Throttle:
+        RateLimit: 100
+        BurstLimit: 200
+
+  SafrUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref SafrApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref SafrUsagePlan
+
+  GovernResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SafrApi
+      ParentId: !GetAtt SafrApi.RootResourceId
+      PathPart: govern
+
+  GovernMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SafrApi
+      ResourceId: !Ref GovernResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EngineFunction.Arn}/invocations"
+
+  GovernPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EngineFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${SafrApi}/*/POST/govern"
+
+  GovernOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SafrApi
+      ResourceId: !Ref GovernResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: "204"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST,GET'"
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+      MethodResponses:
+        - StatusCode: "204"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SafrApi
+      ParentId: !GetAtt SafrApi.RootResourceId
+      PathPart: health
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SafrApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseTemplates:
+              application/json: '{"status":"healthy","service":"safr-governance"}'
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+      MethodResponses:
+        - StatusCode: "200"
+
+  HealthOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SafrApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: "204"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,GET'"
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+      MethodResponses:
+        - StatusCode: "204"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref SafrApi
+    DependsOn:
+      - GovernMethod
+      - GovernOptions
+      - HealthMethod
+      - HealthOptions
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref SafrApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref StageName
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 200
+          ThrottlingRateLimit: 100
+          MetricsEnabled: true
+          DataTraceEnabled: true
+          LoggingLevel: INFO
+      TracingEnabled: true
+
+  # ============================================================
+  # CloudWatch Dashboard + Alarm
+  # ============================================================
+  SafrDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: SAFR-Governance
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "width": 12, "height": 6, "x": 0, "y": 0,
+              "properties": {
+                "view": "timeSeries", "title": "SAFR Decisions by Outcome",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${EngineFunction}", {"label": "Total Evaluations", "stat": "Sum"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "width": 12, "height": 6, "x": 12, "y": 0,
+              "properties": {
+                "view": "timeSeries", "title": "Evaluation Latency",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "${EngineFunction}", {"label": "p50", "stat": "p50"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "${EngineFunction}", {"label": "p99", "stat": "p99"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "width": 12, "height": 4, "x": 0, "y": 6,
+              "properties": {
+                "view": "timeSeries", "title": "Errors",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${EngineFunction}", {"label": "Errors", "stat": "Sum"}]
+                ]
+              }
+            }
+          ]
+        }
+
+  HighErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: safr-high-error-rate
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EngineFunction
+      Period: 300
+      Statistic: Sum
+      Threshold: 5
+
+Outputs:
+  ApiUrl:
+    Description: "SAFR Governance API URL"
+    Value: !Sub "https://${SafrApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/"
+  ApiKeyId:
+    Description: "API Key ID — run: aws apigateway get-api-key --api-key-id <id> --include-value --query value"
+    Value: !Ref SafrApiKey
+  AuditBucketName:
+    Description: "S3 Audit Log bucket (Object Lock enabled)"
+    Value: !Ref AuditBucket
+  DashboardUrl:
+    Description: "CloudWatch Dashboard"
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=SAFR-Governance"

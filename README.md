@@ -98,13 +98,19 @@ This project implements **all five SAFR components** as a single CDK stack with 
 
 ### One-Click Deploy
 
+[![Deploy to AWS](https://img.shields.io/badge/Deploy%20to%20AWS-CloudFormation-%23FF9900?style=for-the-badge&logo=amazonwebservices)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?templateURL=https%3A%2F%2Fraw.githubusercontent.com%2Fkdeath83%2Fsafr-on-aws%2Fmain%2Fdeploy%2Ftemplate.yaml&stackName=SAFR-on-AWS)
+
+Click the button above to launch the stack directly in CloudFormation. The template is self-contained: it creates an S3 bucket, downloads the Lambda code from GitHub, deploys all SAFR components, and seeds controls and agents automatically. No prerequisites beyond AWS console access.
+
+Stack creation takes ~5 minutes. Grab the API key from the Outputs tab when done.
+
+**Alternative: Deploy from CLI**
+
 ```bash
 git clone https://github.com/kdeath83/safr-on-aws.git
 cd safr-on-aws
 ./deploy.sh
 ```
-
-That's it. The script handles CDK bootstrap, stack deployment, and seeds controls and agents. Under five minutes end to end.
 
 [![View on GitHub](https://img.shields.io/badge/View%20on%20GitHub-kdeath83%2Fsafr--on--aws-blue?style=for-the-badge&logo=github)](https://github.com/kdeath83/safr-on-aws)
 
